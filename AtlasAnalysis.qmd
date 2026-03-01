@@ -1,0 +1,480 @@
+```{python}
+import pandas as pd
+
+Crime = pd.read_csv('/Users/harryfranklin/Downloads/Crimes.csv')
+
+Crime.head()
+
+Battery = Crime[Crime['Primary Type'] == 'BATTERY']
+Assault = Crime[Crime['Primary Type'] == 'ASSAULT']
+SA = Crime[Crime['Primary Type'].isin(["CRIMINAL SEXUAL ASSAULT", "CRIM SEXUAL ASSAULT"])]
+Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
+
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.width", None)
+
+Crime.head(5)
+```
+
+```{python}
+import geopandas as gpd
+from shapely.geometry import Point
+
+tracts = gpd.read_file("/Users/harryfranklin/Downloads/Census_20Tracts/Census_Tracts.shp")
+
+geometry = [
+    Point(xy) for xy in zip(Crime["Longitude"], Crime["Latitude"])
+]
+
+crimes_gdf = gpd.GeoDataFrame(
+    Crime,
+    geometry=geometry,
+    crs="EPSG:4326"  
+)
+
+tracts = tracts.to_crs(crimes_gdf.crs)
+
+crimes_with_tracts = gpd.sjoin(
+    crimes_gdf,
+    tracts,
+    how="left",
+    predicate="within"
+)
+
+crimes_with_tracts
+```
+
+```{python}
+Crime = crimes_with_tracts.iloc[:, :-14]
+Crime["Date"] = pd.to_datetime(Crime["Date"])
+
+Battery = Crime[Crime['Primary Type'] == 'BATTERY']
+Assault = Crime[Crime['Primary Type'] == 'ASSAULT']
+SA = Crime[Crime['Primary Type'].isin(["CRIMINAL SEXUAL ASSAULT", "CRIM SEXUAL ASSAULT"])]
+Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
+DV = Crime[Crime['Primary Type'] == 'DOMESTIC VIOLENCE']
+
+Assault
+```
+
+```{python}
+import altair as alt
+alt.data_transformers.disable_max_rows()
+monthly = (
+    Battery
+    .groupby(pd.Grouper(key="Date", freq="M"))
+    .size()
+    .reset_index(name="monthly_count")
+)
+
+chart = (
+    alt.Chart(monthly)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X(
+            "Date:T",
+            title="Month"
+        ),
+        y=alt.Y(
+            "monthly_count:Q",
+            title="Number of Battery Crimes"
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Month"),
+            alt.Tooltip("monthly_count:Q", title="Count")
+        ]
+    )
+    .properties(
+        title="Reported Battery Crimes by Month (2021–2025)",
+        width=700,
+        height=400
+    )
+)
+
+chart
+```
+
+```{python}
+monthly = (
+    Homicide
+    .groupby(pd.Grouper(key="Date", freq="M"))
+    .size()
+    .reset_index(name="monthly_count")
+)
+
+chart = (
+    alt.Chart(monthly)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X(
+            "Date:T",
+            title="Month"
+        ),
+        y=alt.Y(
+            "monthly_count:Q",
+            title="Number of Homicide Crimes"
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Month"),
+            alt.Tooltip("monthly_count:Q", title="Count")
+        ]
+    )
+    .properties(
+        title="Reported Homicide Crimes by Month (2021–2025)",
+        width=700,
+        height=400
+    )
+)
+
+chart
+```
+
+```{python}
+monthly = (
+    SA
+    .groupby(pd.Grouper(key="Date", freq="M"))
+    .size()
+    .reset_index(name="monthly_count")
+)
+
+chart = (
+    alt.Chart(monthly)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X(
+            "Date:T",
+            title="Month"
+        ),
+        y=alt.Y(
+            "monthly_count:Q",
+            title="Number of Sexual Assault Crimes"
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Month"),
+            alt.Tooltip("monthly_count:Q", title="Count")
+        ]
+    )
+    .properties(
+        title="Reported Sexual Assault Crimes by Month (2021–2025)",
+        width=700,
+        height=400
+    )
+)
+
+chart
+```
+
+```{python}
+monthly = (
+    Assault
+    .groupby(pd.Grouper(key="Date", freq="M"))
+    .size()
+    .reset_index(name="monthly_count")
+)
+
+chart = (
+    alt.Chart(monthly)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X(
+            "Date:T",
+            title="Month"
+        ),
+        y=alt.Y(
+            "monthly_count:Q",
+            title="Number of Assault Crimes"
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Month"),
+            alt.Tooltip("monthly_count:Q", title="Count")
+        ]
+    )
+    .properties(
+        title="Reported Assault Crimes by Month (2021–2025)",
+        width=700,
+        height=400
+    )
+)
+
+chart
+```
+
+```{python}
+Assault["Date"] = pd.to_datetime(Assault["Date"])
+
+if "quintile" in Assault.columns:
+    Assault = Assault.drop(columns=["quintile"])
+
+tract_counts = (
+    Assault
+    .groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="total_assaults")
+)
+
+tract_counts["quintile"] = pd.qcut(
+    tract_counts["total_assaults"],
+    5,
+    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
+)
+
+Assault = Assault.merge(
+    tract_counts[["CENSUS_T_1", "quintile"]],
+    on="CENSUS_T_1",
+    how="left"
+)
+
+Assault["month"] = Assault["Date"].dt.to_period("M").dt.to_timestamp()
+
+quintile_time = (
+    Assault
+    .groupby(["month", "quintile"])
+    .size()
+    .reset_index(name="assault_count")
+)
+
+chart = (
+    alt.Chart(quintile_time)
+    .mark_line()
+    .encode(
+        x=alt.X("month:T", title="Month"),
+        y=alt.Y("assault_count:Q", title="Number of Assaults"),
+        color=alt.Color("quintile:N", title="Census Tract Quintile"),
+    )
+    .properties(
+        width=700,
+        height=400,
+        title="Monthly Assaults by Census Tract Quintile"
+    )
+)
+
+chart
+```
+
+```{python}
+Battery["Date"] = pd.to_datetime(Battery["Date"])
+
+if "quintile" in Battery.columns:
+    Battery = Battery.drop(columns=["quintile"])
+
+tract_counts = (
+    Battery
+    .groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="total_batteries")
+)
+
+tract_counts["quintile"] = pd.qcut(
+    tract_counts["total_batteries"],
+    5,
+    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
+)
+
+Battery = Battery.merge(
+    tract_counts[["CENSUS_T_1", "quintile"]],
+    on="CENSUS_T_1",
+    how="left"
+)
+
+Battery["month"] = Battery["Date"].dt.to_period("M").dt.to_timestamp()
+
+quintile_time = (
+    Battery
+    .groupby(["month", "quintile"])
+    .size()
+    .reset_index(name="battery_count")
+)
+
+chart = (
+    alt.Chart(quintile_time)
+    .mark_line()
+    .encode(
+        x=alt.X("month:T", title="Month"),
+        y=alt.Y("battery_count:Q", title="Number of Batteries"),
+        color=alt.Color("quintile:N", title="Census Tract Quintile"),
+    )
+    .properties(
+        width=700,
+        height=400,
+        title="Monthly Batteries by Census Tract Quintile"
+    )
+)
+
+chart
+```
+
+```{python}
+SA["Date"] = pd.to_datetime(SA["Date"])
+
+if "quintile" in SA.columns:
+    SA = SA.drop(columns=["quintile"])
+
+tract_counts = (
+    SA
+    .groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="total_sexual_assaults")
+)
+
+tract_counts["quintile"] = pd.qcut(
+    tract_counts["total_sexual_assaults"],
+    5,
+    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
+)
+
+SA = SA.merge(
+    tract_counts[["CENSUS_T_1", "quintile"]],
+    on="CENSUS_T_1",
+    how="left"
+)
+
+SA["month"] = SA["Date"].dt.to_period("M").dt.to_timestamp()
+
+quintile_time = (
+    SA
+    .groupby(["month", "quintile"])
+    .size()
+    .reset_index(name="sexual_assault_count")
+)
+
+chart = (
+    alt.Chart(quintile_time)
+    .mark_line()
+    .encode(
+        x=alt.X("month:T", title="Month"),
+        y=alt.Y("sexual_assault_count:Q", title="Number of Sexual Assaults"),
+        color=alt.Color("quintile:N", title="Census Tract Quintile"),
+    )
+    .properties(
+        width=700,
+        height=400,
+        title="Monthly Sexual Assaults by Census Tract Quintile"
+    )
+)
+
+chart
+```
+
+```{python}
+Homicide["Date"] = pd.to_datetime(Homicide["Date"])
+
+if "quintile" in Homicide.columns:
+    Homicide = Homicide.drop(columns=["quintile"])
+
+tract_counts = tract_counts.sort_values("total_homicides")
+
+tract_counts["quintile"] = pd.qcut(
+    tract_counts["total_homicides"].rank(method="first"),
+    5,
+    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
+)
+
+Homicide = Homicide.merge(
+    tract_counts[["CENSUS_T_1", "quintile"]],
+    on="CENSUS_T_1",
+    how="left"
+)
+
+Homicide["month"] = Homicide["Date"].dt.to_period("M").dt.to_timestamp()
+
+quintile_time = (
+    Homicide
+    .groupby(["month", "quintile"])
+    .size()
+    .reset_index(name="homicide_count")
+)
+
+chart = (
+    alt.Chart(quintile_time)
+    .mark_line()
+    .encode(
+        x=alt.X("month:T", title="Month"),
+        y=alt.Y("homicide_count:Q", title="Number of Homicides"),
+        color=alt.Color("quintile:N", title="Census Tract Quintile"),
+    )
+    .properties(
+        width=700,
+        height=400,
+        title="Monthly Homicides by Census Tract Quintile"
+    )
+)
+
+chart
+```
+
+```{python}
+Crime["Primary Type"] = Crime["Primary Type"].replace(
+    ["CRIM SEXUAL ASSAULT", "CRIMINAL SEXUAL ASSAULT"],
+    "SEXUAL ASSAULT"
+)
+Crime["Date"] = pd.to_datetime(Crime["Date"])
+Crime2023 = Crime[Crime["Date"].dt.year == 2023].copy()
+
+PMH2023 = pd.read_csv("/Users/harryfranklin/Downloads/PMH2023.csv")
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+PMH2023["GEOID"] = PMH2023["GEOID"].astype(str)
+Crime2023 = Crime2023.merge(
+    PMH2023[["GEOID", "PMH_2023"]],
+    left_on="CENSUS_T_1",
+    right_on="GEOID",
+    how="left"
+)
+
+Crime2023 = Crime2023.drop(
+    columns=[col for col in Crime2023.columns if "GEOID" in col],
+    errors="ignore"
+)
+
+SES2023 = pd.read_csv("/Users/harryfranklin/Downloads/SES2023.csv")
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+SES2023["GEOID"] = SES2023["GEOID"].astype(str)
+Crime2023 = Crime2023.merge(
+    SES2023[["GEOID", "SES_2023"]],
+    left_on="CENSUS_T_1",
+    right_on="GEOID",
+    how="left"
+)
+
+Crime2023 = Crime2023.drop(
+    columns=[col for col in Crime2023.columns if "GEOID" in col],
+    errors="ignore"
+)
+
+HI2023 = pd.read_csv("/Users/harryfranklin/Downloads/HI2023.csv")
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+HI2023["GEOID"] = HI2023["GEOID"].astype(str)
+Crime2023 = Crime2023.merge(
+    HI2023[["GEOID", "HDX_2019-2023"]],
+    left_on="CENSUS_T_1",
+    right_on="GEOID",
+    how="left"
+)
+
+Crime2023 = Crime2023.drop(
+    columns=[col for col in Crime2023.columns if "GEOID" in col],
+    errors="ignore"
+)
+
+CHI2023 = pd.read_csv("/Users/harryfranklin/Downloads/CHI2023.csv")
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+CHI2023["GEOID"] = CHI2023["GEOID"].astype(str)
+Crime2023 = Crime2023.merge(
+    CHI2023[["GEOID", "CHACFZN_2023"]],
+    left_on="CENSUS_T_1",
+    right_on="GEOID",
+    how="left"
+)
+
+Crime2023 = Crime2023.drop(
+    columns=[col for col in Crime2023.columns if "GEOID" in col],
+    errors="ignore"
+)
+
+Crime2023 = Crime2023.rename(columns={"HDX_2019-2023": "HDX"})
+Crime2023 = Crime2023.rename(columns={"CHACFZN_2023": "COI"})
+
+Crime2023
+```
+
+
