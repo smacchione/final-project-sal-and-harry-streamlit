@@ -1,0 +1,98 @@
+---
+title: "SVI Plots"
+format: pdf
+---
+
+```{python}
+#libraries and plugins
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import altair as alt 
+import os
+import seaborn as sns 
+import geopandas as gpd
+from shapely.geometry import Point
+
+#settings
+pd.set_option('display.max_columns', None)
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.width", None)
+
+#extra settings
+import warnings 
+warnings.filterwarnings('ignore')
+alt.renderers.enable("png")
+alt.data_transformers.disable_max_rows()
+
+import tempfile 
+from IPython.display import SVG, display, Image
+import vl_convert as vlc
+
+def display_altair_png(chart, scale=2):
+    """
+    Render an Altair chart to a PNG and display it inline.
+
+    Parameters
+    ----------
+    chart : altair.Chart
+        Altair chart object to render.
+    scale : int, optional
+        Resolution scaling factor for the PNG (default = 2). Use scale=2 for standard slides. Use scale = 3–4 for dense figures or PDF exports.
+    """
+    png_bytes = vlc.vegalite_to_png(chart.to_dict(), scale=scale)
+
+    # Write to a temporary PNG file and display
+    with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
+        tmp.write(png_bytes)
+        tmp.flush()
+        display(Image(filename=tmp.name))
+```
+
+```{python}
+#loading and adjusting data
+base_path = os.path.dirname(os.path.abspath(__file__))
+crime = pd.read_csv(os.path.join(base_path, "data/derived-data/crime_svi_merge_no_na.csv"))
+
+#adding and fixing date(s)
+crime["Date"] = pd.to_datetime(crime["Date"], errors="coerce")
+crime["month"] = crime["Date"].dt.to_period("M").dt.to_timestamp()
+
+#adding quintiles for SVI
+##ignore null values in SVI
+crime["SVI_quintile"] = pd.cut(
+    crime["SVI"],
+    bins=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    labels=["1", "2", "3", "4", "5"],
+    include_lowest=True)
+crime.head()
+```
+
+```{python}
+#reported crimes by quintile, overall
+crime = crime.dropna(subset=["SVI_quintile"])
+incidents_q = alt.Chart(crime).mark_bar().encode(
+    x=alt.X("SVI_quintile:N", title="SVI Quintile (1=lowest, 5=highest)", sort=["1","2","3","4","5"]),
+    y=alt.Y("count():Q", title="Number of incidents")
+).properties(
+    title="Reported Violent Crimes by SVI Quintile, Chicago, 2021-2025",
+    width=650,
+    height=380
+)
+incidents_q
+```
+
+```{python}
+#report crimes by quintile, per capita
+pop_grouped = crime.groupby("SVI_quintile").agg({"E_TOTPOP": "sum", "ID": "count"}).reset_index()
+pop_grouped["incidents_per_1000"] = (pop_grouped["ID"] / pop_grouped["E_TOTPOP"]) * 1000
+incidents_per_capita = alt.Chart(pop_grouped).mark_bar().encode(
+    x=alt.X("SVI_quintile:N", title="SVI Quintile (1=lowest, 5=highest)", sort=["1","2","3","4","5"]),
+    y=alt.Y("incidents_per_1000:Q", title="Incidents per 1,000 residents")
+).properties(
+    title="Reported Violent Crimes per Capita by SVI Quintile, Chicago, 2021-2025",
+    width=650,
+    height=380
+)
+incidents_per_capita
+```
