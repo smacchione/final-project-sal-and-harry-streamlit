@@ -5,11 +5,6 @@ Crime = pd.read_csv('/Users/harryfranklin/Downloads/Crimes.csv')
 
 Crime.head()
 
-Battery = Crime[Crime['Primary Type'] == 'BATTERY']
-Assault = Crime[Crime['Primary Type'] == 'ASSAULT']
-SA = Crime[Crime['Primary Type'].isin(["CRIMINAL SEXUAL ASSAULT", "CRIM SEXUAL ASSAULT"])]
-Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
-
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_colwidth", None)
 pd.set_option("display.width", None)
@@ -55,7 +50,22 @@ SA = Crime[Crime['Primary Type'].isin(["CRIMINAL SEXUAL ASSAULT", "CRIM SEXUAL A
 Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
 DV = Crime[Crime['Primary Type'] == 'DOMESTIC VIOLENCE']
 
-Assault
+Pop2023 = pd.read_csv("/Users/harryfranklin/Downloads/Population.csv")
+Crime["CENSUS_T_1"] = Crime["CENSUS_T_1"].astype(str)
+Pop2023["GEOID"] = Pop2023["GEOID"].astype(str)
+Crime = Crime.merge(
+    Pop2023[["GEOID", "Population"]],
+    left_on="CENSUS_T_1",
+    right_on="GEOID",
+    how="left"
+)
+
+Crime = Crime.drop(
+    columns=[col for col in Crime.columns if "GEOID" in col],
+    errors="ignore"
+)
+
+Crime
 ```
 
 ```{python}
@@ -68,7 +78,7 @@ monthly = (
     .reset_index(name="monthly_count")
 )
 
-chart = (
+chart1 = (
     alt.Chart(monthly)
     .mark_line(point=True)
     .encode(
@@ -92,7 +102,7 @@ chart = (
     )
 )
 
-chart
+chart1
 ```
 
 ```{python}
@@ -103,7 +113,7 @@ monthly = (
     .reset_index(name="monthly_count")
 )
 
-chart = (
+chart2 = (
     alt.Chart(monthly)
     .mark_line(point=True)
     .encode(
@@ -127,7 +137,7 @@ chart = (
     )
 )
 
-chart
+chart2
 ```
 
 ```{python}
@@ -138,7 +148,7 @@ monthly = (
     .reset_index(name="monthly_count")
 )
 
-chart = (
+chart3 = (
     alt.Chart(monthly)
     .mark_line(point=True)
     .encode(
@@ -162,7 +172,7 @@ chart = (
     )
 )
 
-chart
+chart3
 ```
 
 ```{python}
@@ -173,7 +183,7 @@ monthly = (
     .reset_index(name="monthly_count")
 )
 
-chart = (
+chart4 = (
     alt.Chart(monthly)
     .mark_line(point=True)
     .encode(
@@ -197,7 +207,7 @@ chart = (
     )
 )
 
-chart
+chart4
 ```
 
 ```{python}
@@ -234,7 +244,7 @@ quintile_time = (
     .reset_index(name="assault_count")
 )
 
-chart = (
+chart5 = (
     alt.Chart(quintile_time)
     .mark_line()
     .encode(
@@ -249,7 +259,7 @@ chart = (
     )
 )
 
-chart
+chart5
 ```
 
 ```{python}
@@ -286,7 +296,7 @@ quintile_time = (
     .reset_index(name="battery_count")
 )
 
-chart = (
+chart6 = (
     alt.Chart(quintile_time)
     .mark_line()
     .encode(
@@ -301,7 +311,7 @@ chart = (
     )
 )
 
-chart
+chart6
 ```
 
 ```{python}
@@ -338,7 +348,7 @@ quintile_time = (
     .reset_index(name="sexual_assault_count")
 )
 
-chart = (
+chart7 = (
     alt.Chart(quintile_time)
     .mark_line()
     .encode(
@@ -353,7 +363,7 @@ chart = (
     )
 )
 
-chart
+chart7
 ```
 
 ```{python}
@@ -361,6 +371,13 @@ Homicide["Date"] = pd.to_datetime(Homicide["Date"])
 
 if "quintile" in Homicide.columns:
     Homicide = Homicide.drop(columns=["quintile"])
+
+tract_counts = (
+    Homicide
+    .groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="total_homicides")
+)
 
 tract_counts = tract_counts.sort_values("total_homicides")
 
@@ -385,7 +402,7 @@ quintile_time = (
     .reset_index(name="homicide_count")
 )
 
-chart = (
+chart8 = (
     alt.Chart(quintile_time)
     .mark_line()
     .encode(
@@ -400,7 +417,7 @@ chart = (
     )
 )
 
-chart
+chart8
 ```
 
 ```{python}
@@ -474,7 +491,206 @@ Crime2023 = Crime2023.drop(
 Crime2023 = Crime2023.rename(columns={"HDX_2019-2023": "HDX"})
 Crime2023 = Crime2023.rename(columns={"CHACFZN_2023": "COI"})
 
-Crime2023
+Crime2023 = Crime2023.rename(columns={"PMH_2023": "PMH"})
+Crime2023 = Crime2023.rename(columns={"SES_2023": "SES"})
+Crime2023 = Crime2023.dropna(subset=["Population"])
+
+Crime2023["Population"] = (
+    Crime2023["Population"]
+    .astype(str)            # ensure it's a string first
+    .str.replace(",", "", regex=False)
+    .str.strip()
+)
+Crime2023["Population"] = pd.to_numeric(Crime2023["Population"], errors="coerce")
+
+tract_vars = (
+    Crime2023.groupby("CENSUS_T_1", as_index=False)
+    .agg({
+        "PMH": "first",
+        "SES": "first",
+        "HDX": "first",
+        "COI": "first",
+        "Population": "first"
+    })
+)
+
+cols_to_numeric = ["PMH", "SES", "HDX", "COI"]
+for col in cols_to_numeric:
+    Crime2023[col] = pd.to_numeric(Crime2023[col], errors="coerce")
+
+# Clean Population separately
+Crime2023["Population"] = (
+    Crime2023["Population"].astype(str)
+    .str.replace(",", "", regex=False)
+    .str.strip()
+)
+Crime2023["Population"] = pd.to_numeric(Crime2023["Population"], errors="coerce")
+
+Crime2023["Date"] = pd.to_datetime(Crime2023["Date"])
+
+# Count crimes per tract
+tract_crime = (
+    Crime2023
+    .groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="crime_count")
+)
+
+# Aggregate tract-level variables
+tract_vars = (
+    Crime2023.groupby("CENSUS_T_1", as_index=False)
+    .agg({
+        "PMH": "first",
+        "SES": "first",
+        "HDX": "first",
+        "COI": "first",
+        "Population": "first"
+    })
+)
+
+# Merge counts with tract variables
+tract_data = tract_crime.merge(tract_vars, on="CENSUS_T_1", how="left")
+
+# Keep only tracts with positive population
+tract_data = tract_data[tract_data["Population"] > 0]
+
+# Compute crime rate
+tract_data["crime_rate"] = (tract_data["crime_count"] / tract_data["Population"]) * 1000
+
+# Compute correlations
+corr_cols = ["crime_rate", "PMH", "SES", "HDX", "COI"]
+correlations = tract_data[corr_cols].corr(method="pearson")
+print(correlations["crime_rate"].sort_values(ascending=False))
 ```
+
+```{python}
+import geopandas as gpd
+
+PATH = "data/Census_20Tracts/Census_Tracts.shp"
+gdf = gpd.read_file(PATH)
+gdf = gdf.to_crs(epsg=4326)
+
+import altair as alt
+import pandas as pd
+import json
+
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+gdf["CENSUS_T_1"] = gdf["CENSUS_T_1"].astype(str)
+
+
+tract_crimes = (
+    Crime2023.groupby("CENSUS_T_1")
+    .size()
+    .reset_index(name="total_crimes")
+)
+
+tract_crimes = tract_crimes.merge(
+    Crime2023[["CENSUS_T_1", "Population"]].drop_duplicates(),
+    on="CENSUS_T_1",
+    how="left"
+)
+
+tract_crimes["crime_rate"] = (tract_crimes["total_crimes"] / tract_crimes["Population"]) * 1000
+
+gdf = gdf.drop(columns=[col for col in gdf.columns if "crime_rate" in col], errors="ignore")
+gdf = gdf.merge(
+    tract_crimes[["CENSUS_T_1", "crime_rate"]],
+    on="CENSUS_T_1",
+    how="left"
+)
+
+gdf["crime_rate"] = gdf["crime_rate"].fillna(0)  
+
+gdf_json = json.loads(gdf.to_json())
+
+chart9 = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
+    color=alt.Color(
+        'properties.crime_rate:Q',
+        scale=alt.Scale(scheme='reds'),
+        title='Crime Rate per 1,000 Residents'
+    ),
+    tooltip=[
+        alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
+        alt.Tooltip('properties.crime_rate:Q', title='Crime Rate')
+    ]
+).properties(
+    width=700,
+    height=700,
+    title='Chicago Crime Rate by Census Tract (2023)'
+).project('mercator')  # ← use mercator projection to orient north-up
+
+chart9
+```
+
+```{python}
+Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
+gdf["CENSUS_T_1"] = gdf["CENSUS_T_1"].astype(str)
+
+# Compute crime rate per 1,000 residents
+tract_data = (
+    Crime2023.groupby("CENSUS_T_1")
+    .agg(
+        total_crimes=('CENSUS_T_1', 'size'),
+        Population=('Population', 'first'),
+        PMH=('PMH', 'first'),
+        SES=('SES', 'first'),
+        HDX=('HDX', 'first'),
+        COI=('COI', 'first')
+    )
+    .reset_index()
+)
+
+tract_data["crime_rate"] = (tract_data["total_crimes"] / tract_data["Population"]) * 1000
+
+gdf = gdf.merge(
+    tract_data[['CENSUS_T_1', 'crime_rate', 'PMH', 'SES', 'HDX', 'COI']],
+    on='CENSUS_T_1',
+    how='left'
+)
+
+for col in ['PMH','SES','HDX','COI']:
+    gdf[col] = gdf[col].fillna(0)
+
+gdf_json = json.loads(gdf.to_json())
+```
+
+```{python}
+def plot_chicago_heatmap(var, title=None, color_scheme='reds'):
+    if title is None:
+        title = f'Chicago {var} by Census Tract (2023)'
+    
+    chart = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
+        color=alt.Color(
+            f'properties.{var}:Q',
+            scale=alt.Scale(scheme=color_scheme),
+            title=var.replace('_',' ')
+        ),
+        tooltip=[
+            alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
+            alt.Tooltip(f'properties.{var}:Q', title=var.replace('_',' '))
+        ]
+    ).properties(
+        width=700,
+        height=700,
+        title=title
+    ).project('mercator')
+    
+    return chart
+
+plot_chicago_heatmap('PMH', 'Chicago % Poor Mental Health by Census Tract (2023)', color_scheme='blues')
+```
+
+```{python}
+plot_chicago_heatmap('SES', 'Chicago % Lacking Social/Emotional Support by Census Tract (2023)', color_scheme='purples')
+```
+
+```{python}
+plot_chicago_heatmap('PMH', 'Chicago % Child Opportunity Index by Census Tract (2023)', color_scheme='greens')
+```
+
+```{python}
+plot_chicago_heatmap('HDX', 'Chicago % Hardship Index by Census Tract (2023)', color_scheme='oranges')
+```
+
 
 
