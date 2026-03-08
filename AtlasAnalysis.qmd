@@ -1,12 +1,12 @@
+Load and inspect the crime data for 2021-2025
+
 ```{python}
 import pandas as pd
-import warnings
 import altair as alt
-warnings.filterwarnings('ignore')
-alt.renderers.enable("png")
-alt.data_transformers.disable_max_rows()
+import geopandas as gpd
+from shapely.geometry import Point
 
-Crime = pd.read_csv('data/Crimes.csv')
+Crime = pd.read_csv('data/raw-data/InitialCrimes.csv')
 
 Crime.head()
 
@@ -17,728 +17,682 @@ pd.set_option("display.width", None)
 Crime.head(5)
 ```
 
+Join the crime data with zip code data and drop crimes with missing zip codes.
+
 ```{python}
-import geopandas as gpd
-from shapely.geometry import Point
+Crime = Crime.dropna(subset=["Latitude", "Longitude"])
 
-tracts = gpd.read_file("/Users/harryfranklin/Downloads/Census_20Tracts/Census_Tracts.shp")
-
-geometry = [
-    Point(xy) for xy in zip(Crime["Longitude"], Crime["Latitude"])
-]
-
-crimes_gdf = gpd.GeoDataFrame(
+Crime_gdf = gpd.GeoDataFrame(
     Crime,
-    geometry=geometry,
-    crs="EPSG:4326"  
+    geometry=gpd.points_from_xy(Crime['Longitude'], Crime['Latitude']),
+    crs="EPSG:4326"
 )
 
-tracts = tracts.to_crs(crimes_gdf.crs)
+zip_codes = gpd.read_file("data/raw-data/ZC/ZC.shp")
 
-crimes_with_tracts = gpd.sjoin(
-    crimes_gdf,
-    tracts,
+zip_codes = zip_codes.to_crs(Crime_gdf.crs)
+
+Crime_with_zip = gpd.sjoin(
+    Crime_gdf,
+    zip_codes,
     how="left",
     predicate="within"
 )
 
-crimes_with_tracts
+Crime["Zip Code"] = Crime_with_zip["zip"]
+
+missing = Crime["Zip Code"].isna().sum()
+print(f"{missing} crimes do not have a ZIP code.")
+
+Crime = Crime.dropna(subset=["Zip Code"])
 ```
 
+Merge the crime data with the population data.
 ```{python}
-Crime = crimes_with_tracts.iloc[:, :-14]
 Crime["Date"] = pd.to_datetime(Crime["Date"])
 
-Battery = Crime[Crime['Primary Type'] == 'BATTERY']
-Assault = Crime[Crime['Primary Type'] == 'ASSAULT']
-SA = Crime[Crime['Primary Type'].isin(["CRIMINAL SEXUAL ASSAULT", "CRIM SEXUAL ASSAULT"])]
-Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
-DV = Crime[Crime['Primary Type'] == 'DOMESTIC VIOLENCE']
-
-Pop2023 = pd.read_csv("/Users/harryfranklin/Downloads/Population.csv")
-Crime["CENSUS_T_1"] = Crime["CENSUS_T_1"].astype(str)
-Pop2023["GEOID"] = Pop2023["GEOID"].astype(str)
+Population = pd.read_csv("data/raw-data/PopulationZC.csv")
+Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+Population["GEOID"] = Population["GEOID"].astype(str)
 Crime = Crime.merge(
-    Pop2023[["GEOID", "Population"]],
-    left_on="CENSUS_T_1",
+    Population[["GEOID", "POP_2019-2023"]],
+    left_on="Zip Code",
     right_on="GEOID",
     how="left"
 )
-
-Crime = Crime.drop(
-    columns=[col for col in Crime.columns if "GEOID" in col],
-    errors="ignore"
-)
-
-Crime
+Crime = Crime.drop(columns=["GEOID"])
+Crime = Crime.rename(columns={"POP_2019-2023": "Population"})
 ```
 
+Chart monthly crime in Chicago over time.
+
 ```{python}
-alt.data_transformers.disable_max_rows()
-monthly = (
-    Battery
-    .groupby(pd.Grouper(key="Date", freq="M"))
+monthly_crime = (
+    Crime
+    .set_index("Date")
+    .resample("M")
     .size()
-    .reset_index(name="monthly_count")
+    .reset_index(name="CrimeCount")
 )
 
-chart1 = (
-    alt.Chart(monthly)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(
-            "Date:T",
-            title="Month"
-        ),
-        y=alt.Y(
-            "monthly_count:Q",
-            title="Number of Battery Crimes"
-        ),
-        tooltip=[
-            alt.Tooltip("Date:T", title="Month"),
-            alt.Tooltip("monthly_count:Q", title="Count")
-        ]
-    )
-    .properties(
-        title="Reported Battery Crimes by Month (2021–2025)",
-        width=700,
-        height=400
-    )
+chart1 = alt.Chart(monthly_crime).mark_line().encode(
+    x=alt.X("Date:T", title="Month"),
+    y=alt.Y("CrimeCount:Q", title="Number of Crimes")
+).properties(
+    width=700,
+    height=400,
+    title="Monthly Crime in Chicago (2021–2025)"
 )
 
 chart1
 ```
 
+Combine the two sexual assault categories, and make a function to plot different crime types by month over time.
+
 ```{python}
-monthly = (
-    Homicide
-    .groupby(pd.Grouper(key="Date", freq="M"))
-    .size()
-    .reset_index(name="monthly_count")
+Crime["Primary Type"] = Crime["Primary Type"].replace({
+    "CRIM SEXUAL ASSAULT": "CRIMINAL SEXUAL ASSAULT"
+})
+
+def crime_trend(crime_type):
+    
+    subset = Crime[Crime["Primary Type"] == crime_type]
+    
+    monthly_counts = (
+        subset
+        .set_index("Date")
+        .resample("M")
+        .size()
+        .reset_index(name="CrimeCount")
+    )
+    
+    chart = alt.Chart(monthly_counts).mark_line().encode(
+        x=alt.X("Date:T", title="Month"),
+        y=alt.Y("CrimeCount:Q", title="Number of Crimes")
+    ).properties(
+        width=700,
+        height=400,
+        title=f"Monthly {crime_type} Crimes in Chicago"
+    )
+    
+    return chart
+```
+
+Generate monthly crime graphs for each crime type.
+
+```{python}
+crime_trend("ASSAULT")
+```
+
+```{python}
+crime_trend("BATTERY")
+```
+
+```{python}
+crime_trend("CRIMINAL SEXUAL ASSAULT")
+```
+
+```{python}
+crime_trend("HOMICIDE")
+```
+
+Calculate the crime rate in each zip code and divide the data into quintiles by crime rate. Then plot monthly crime rates by quintile.
+```{python}
+Crime["Population"] = (
+    Crime["Population"]
+    .str.replace(",", "", regex=False)
+    .astype(float)
 )
 
-chart2 = (
-    alt.Chart(monthly)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(
-            "Date:T",
-            title="Month"
-        ),
-        y=alt.Y(
-            "monthly_count:Q",
-            title="Number of Homicide Crimes"
-        ),
-        tooltip=[
-            alt.Tooltip("Date:T", title="Month"),
-            alt.Tooltip("monthly_count:Q", title="Count")
-        ]
-    )
-    .properties(
-        title="Reported Homicide Crimes by Month (2021–2025)",
-        width=700,
-        height=400
-    )
+Crime["Population"] = pd.to_numeric(Crime["Population"])
+
+zip_crime_counts = (
+    Crime.groupby("Zip Code")
+    .size()
+    .reset_index(name="TotalCrimes")
+)
+
+zip_population = Crime[["Zip Code", "Population"]].drop_duplicates()
+
+zip_stats = zip_crime_counts.merge(zip_population, on="Zip Code")
+
+zip_stats["CrimeRate"] = zip_stats["TotalCrimes"] / zip_stats["Population"] * 1000
+
+zip_stats["Quintile"] = pd.qcut(
+    zip_stats["CrimeRate"],
+    5,
+    labels=["Q1 Lowest", "Q2", "Q3", "Q4", "Q5 Highest"]
+)
+
+Crime = Crime.merge(
+    zip_stats[["Zip Code", "Quintile"]],
+    on="Zip Code",
+    how="left"
+)
+
+monthly_quintile = (
+    Crime
+    .set_index("Date")
+    .groupby("Quintile")
+    .resample("M")
+    .size()
+    .reset_index(name="CrimeCount")
+)
+
+pop_by_quintile = (
+    zip_stats.groupby("Quintile")["Population"]
+    .sum()
+    .reset_index()
+)
+
+monthly_quintile = monthly_quintile.merge(
+    pop_by_quintile,
+    on="Quintile"
+)
+
+monthly_quintile["CrimeRate"] = (
+    monthly_quintile["CrimeCount"] / monthly_quintile["Population"] * 1000
+)
+
+chart2 = alt.Chart(monthly_quintile).mark_line().encode(
+    x=alt.X("Date:T", title="Month"),
+    y=alt.Y("CrimeRate:Q", title="Crime Rate (per 1,000 Residents)"),
+    color=alt.Color(
+        "Quintile:N",
+        scale=alt.Scale(range=[
+            "#08306B",  
+            "#2171B5",
+            "#6BAED6",
+            "#BDD7E7",
+            "#C6DBEF"   
+        ]),
+        title="Zip Code Crime Rate Quintile")
+).properties(
+    width=700,
+    height=400,
+    title="Monthly Crime Rates by Zip Code Crime Rate Quintile"
 )
 
 chart2
 ```
 
+Plot the total monthly crime rate over time in Chicago.
 ```{python}
-monthly = (
-    SA
-    .groupby(pd.Grouper(key="Date", freq="M"))
-    .size()
-    .reset_index(name="monthly_count")
+total_population = (
+    Crime[["Zip Code", "Population"]]
+    .drop_duplicates()
+    ["Population"]
+    .sum()
 )
 
-chart3 = (
-    alt.Chart(monthly)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(
-            "Date:T",
-            title="Month"
-        ),
-        y=alt.Y(
-            "monthly_count:Q",
-            title="Number of Sexual Assault Crimes"
-        ),
-        tooltip=[
-            alt.Tooltip("Date:T", title="Month"),
-            alt.Tooltip("monthly_count:Q", title="Count")
-        ]
-    )
-    .properties(
-        title="Reported Sexual Assault Crimes by Month (2021–2025)",
-        width=700,
-        height=400
-    )
+monthly_total = (
+    Crime
+    .set_index("Date")
+    .resample("M")
+    .size()
+    .reset_index(name="CrimeCount")
+)
+
+monthly_total["CrimeRate"] = (
+    monthly_total["CrimeCount"] / total_population * 1000
+)
+
+chart3 = alt.Chart(monthly_total).mark_line(color="#08306B").encode(
+    x=alt.X("Date:T", title="Month"),
+    y=alt.Y("CrimeRate:Q", title="Crime Rate (per 1,000 residents)")
+).properties(
+    width=700,
+    height=400,
+    title="Monthly Crime Rate in Chicago (2021–2025)"
 )
 
 chart3
 ```
 
+Define a function to plot the crime rate for any crime type over time.
 ```{python}
-monthly = (
-    Assault
-    .groupby(pd.Grouper(key="Date", freq="M"))
-    .size()
-    .reset_index(name="monthly_count")
-)
+def crime_rate_type(crime_type):
 
-chart4 = (
-    alt.Chart(monthly)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(
-            "Date:T",
-            title="Month"
-        ),
-        y=alt.Y(
-            "monthly_count:Q",
-            title="Number of Assault Crimes"
-        ),
-        tooltip=[
-            alt.Tooltip("Date:T", title="Month"),
-            alt.Tooltip("monthly_count:Q", title="Count")
-        ]
+    subset = Crime[Crime["Primary Type"] == crime_type]
+
+    monthly = (
+        subset
+        .set_index("Date")
+        .resample("M")
+        .size()
+        .reset_index(name="CrimeCount")
     )
-    .properties(
-        title="Reported Assault Crimes by Month (2021–2025)",
-        width=700,
-        height=400
+
+    total_population = (
+        Crime[["Zip Code", "Population"]]
+        .drop_duplicates()["Population"]
+        .sum()
     )
-)
 
-chart4
-```
+    monthly["CrimeRate"] = monthly["CrimeCount"] / total_population * 1000
 
-```{python}
-Assault["Date"] = pd.to_datetime(Assault["Date"])
-
-if "quintile" in Assault.columns:
-    Assault = Assault.drop(columns=["quintile"])
-
-tract_counts = (
-    Assault
-    .groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="total_assaults")
-)
-
-tract_counts["quintile"] = pd.qcut(
-    tract_counts["total_assaults"],
-    5,
-    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
-)
-
-Assault = Assault.merge(
-    tract_counts[["CENSUS_T_1", "quintile"]],
-    on="CENSUS_T_1",
-    how="left"
-)
-
-Assault["month"] = Assault["Date"].dt.to_period("M").dt.to_timestamp()
-
-quintile_time = (
-    Assault
-    .groupby(["month", "quintile"])
-    .size()
-    .reset_index(name="assault_count")
-)
-
-chart5 = (
-    alt.Chart(quintile_time)
-    .mark_line()
-    .encode(
-        x=alt.X("month:T", title="Month"),
-        y=alt.Y("assault_count:Q", title="Number of Assaults"),
-        color=alt.Color("quintile:N", title="Census Tract Quintile"),
-    )
-    .properties(
+    chart = alt.Chart(monthly).mark_line(color="#08306B").encode(
+        x=alt.X("Date:T", title="Month"),
+        y=alt.Y("CrimeRate:Q", title="Crimes per 1,000 Residents")
+    ).properties(
         width=700,
         height=400,
-        title="Monthly Assaults by Census Tract Quintile"
+        title=f"Monthly {crime_type} Crime Rate"
     )
-)
 
-chart5
+    return chart
+```
+
+Plot the crime rates for each crime type
+
+```{python}
+crime_rate_type("ASSAULT")
 ```
 
 ```{python}
-Battery["Date"] = pd.to_datetime(Battery["Date"])
+crime_rate_type("BATTERY")
+```
 
-if "quintile" in Battery.columns:
-    Battery = Battery.drop(columns=["quintile"])
+```{python}
+crime_rate_type("CRIMINAL SEXUAL ASSAULT")
+```
 
-tract_counts = (
-    Battery
-    .groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="total_batteries")
-)
+```{python}
+crime_rate_type("HOMICIDE")
+```
 
-tract_counts["quintile"] = pd.qcut(
-    tract_counts["total_batteries"],
-    5,
-    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
-)
+Define a function to split the zip codes into quintiles by crime rate for a specific crime type and then graph the crime rate for that type in each quintile.
 
-Battery = Battery.merge(
-    tract_counts[["CENSUS_T_1", "quintile"]],
-    on="CENSUS_T_1",
-    how="left"
-)
+```{python}
+def crime_quintile_trend(crime_type):
 
-Battery["month"] = Battery["Date"].dt.to_period("M").dt.to_timestamp()
+    subset = Crime[Crime["Primary Type"] == crime_type].copy()
 
-quintile_time = (
-    Battery
-    .groupby(["month", "quintile"])
-    .size()
-    .reset_index(name="battery_count")
-)
+    # Remove the previously-created quintile column if it exists
+    if "Quintile" in subset.columns:
+        subset = subset.drop(columns=["Quintile"])
 
-chart6 = (
-    alt.Chart(quintile_time)
-    .mark_line()
-    .encode(
-        x=alt.X("month:T", title="Month"),
-        y=alt.Y("battery_count:Q", title="Number of Batteries"),
-        color=alt.Color("quintile:N", title="Census Tract Quintile"),
+    # Count crimes of this type by ZIP
+    zip_counts = (
+        subset.groupby("Zip Code")
+        .size()
+        .reset_index(name="TotalCrimes")
     )
-    .properties(
+
+    # ZIP populations
+    zip_pop = Crime[["Zip Code", "Population"]].drop_duplicates()
+
+    # Merge so ZIPs with zero crimes still appear
+    zip_stats = zip_pop.merge(zip_counts, on="Zip Code", how="left")
+
+    zip_stats["TotalCrimes"] = zip_stats["TotalCrimes"].fillna(0)
+
+    # Crime rate per 1,000 residents
+    zip_stats["CrimeRate"] = zip_stats["TotalCrimes"] / zip_stats["Population"] * 1000
+
+    # Create quintiles for this crime type
+    zip_stats["Quintile"] = pd.qcut(
+        zip_stats["CrimeRate"],
+        5,
+        labels=["Q1 Lowest", "Q2", "Q3", "Q4", "Q5 Highest"]
+    )
+
+    # Attach quintile to crimes
+    subset = subset.merge(
+        zip_stats[["Zip Code", "Quintile"]],
+        on="Zip Code",
+        how="left"
+    )
+
+    # Monthly crime counts by quintile
+    monthly = (
+        subset
+        .set_index("Date")
+        .groupby("Quintile")
+        .resample("M")
+        .size()
+        .reset_index(name="CrimeCount")
+    )
+
+    # Population per quintile
+    pop_by_quintile = (
+        zip_stats.groupby("Quintile")["Population"]
+        .sum()
+        .reset_index()
+    )
+
+    monthly = monthly.merge(pop_by_quintile, on="Quintile")
+
+    monthly["CrimeRate"] = monthly["CrimeCount"] / monthly["Population"] * 1000
+
+    chart = alt.Chart(monthly).mark_line().encode(
+        x=alt.X("Date:T", title="Month"),
+        y=alt.Y("CrimeRate:Q", title="Crimes per 1,000 Residents"),
+        color=alt.Color(
+            "Quintile:N",
+            scale=alt.Scale(range=[
+                "#08306B",
+                "#2171B5",
+                "#6BAED6",
+                "#BDD7E7",
+                "#C6DBEF"
+            ]),
+            title="Zip Code Crime Rate Quintile"
+        )
+    ).properties(
         width=700,
         height=400,
-        title="Monthly Batteries by Census Tract Quintile"
+        title=f"Monthly {crime_type} Crime Rates by Zip Code Quintile"
     )
-)
 
-chart6
+    return chart
+```
+
+Plot quintile graphs for each crime type 
+
+```{python}
+crime_quintile_trend("ASSAULT")
 ```
 
 ```{python}
-SA["Date"] = pd.to_datetime(SA["Date"])
-
-if "quintile" in SA.columns:
-    SA = SA.drop(columns=["quintile"])
-
-tract_counts = (
-    SA
-    .groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="total_sexual_assaults")
-)
-
-tract_counts["quintile"] = pd.qcut(
-    tract_counts["total_sexual_assaults"],
-    5,
-    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
-)
-
-SA = SA.merge(
-    tract_counts[["CENSUS_T_1", "quintile"]],
-    on="CENSUS_T_1",
-    how="left"
-)
-
-SA["month"] = SA["Date"].dt.to_period("M").dt.to_timestamp()
-
-quintile_time = (
-    SA
-    .groupby(["month", "quintile"])
-    .size()
-    .reset_index(name="sexual_assault_count")
-)
-
-chart7 = (
-    alt.Chart(quintile_time)
-    .mark_line()
-    .encode(
-        x=alt.X("month:T", title="Month"),
-        y=alt.Y("sexual_assault_count:Q", title="Number of Sexual Assaults"),
-        color=alt.Color("quintile:N", title="Census Tract Quintile"),
-    )
-    .properties(
-        width=700,
-        height=400,
-        title="Monthly Sexual Assaults by Census Tract Quintile"
-    )
-)
-
-chart7
+crime_quintile_trend("BATTERY")
 ```
 
 ```{python}
-Homicide["Date"] = pd.to_datetime(Homicide["Date"])
-
-if "quintile" in Homicide.columns:
-    Homicide = Homicide.drop(columns=["quintile"])
-
-tract_counts = (
-    Homicide
-    .groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="total_homicides")
-)
-
-tract_counts = tract_counts.sort_values("total_homicides")
-
-tract_counts["quintile"] = pd.qcut(
-    tract_counts["total_homicides"].rank(method="first"),
-    5,
-    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
-)
-
-Homicide = Homicide.merge(
-    tract_counts[["CENSUS_T_1", "quintile"]],
-    on="CENSUS_T_1",
-    how="left"
-)
-
-Homicide["month"] = Homicide["Date"].dt.to_period("M").dt.to_timestamp()
-
-quintile_time = (
-    Homicide
-    .groupby(["month", "quintile"])
-    .size()
-    .reset_index(name="homicide_count")
-)
-
-chart8 = (
-    alt.Chart(quintile_time)
-    .mark_line()
-    .encode(
-        x=alt.X("month:T", title="Month"),
-        y=alt.Y("homicide_count:Q", title="Number of Homicides"),
-        color=alt.Color("quintile:N", title="Census Tract Quintile"),
-    )
-    .properties(
-        width=700,
-        height=400,
-        title="Monthly Homicides by Census Tract Quintile"
-    )
-)
-
-chart8
+crime_quintile_trend("CRIMINAL SEXUAL ASSAULT")
 ```
 
 ```{python}
-Crime["Primary Type"] = Crime["Primary Type"].replace(
-    ["CRIM SEXUAL ASSAULT", "CRIMINAL SEXUAL ASSAULT"],
-    "SEXUAL ASSAULT"
-)
-Crime["Date"] = pd.to_datetime(Crime["Date"])
-Crime2023 = Crime[Crime["Date"].dt.year == 2023].copy()
+crime_quintile_trend("HOMICIDE")
+```
 
-PMH2023 = pd.read_csv("/Users/harryfranklin/Downloads/PMH2023.csv")
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-PMH2023["GEOID"] = PMH2023["GEOID"].astype(str)
-Crime2023 = Crime2023.merge(
-    PMH2023[["GEOID", "PMH_2023"]],
-    left_on="CENSUS_T_1",
+Merge the crime data with the poor mental health, social/emotional support, and child opportunity index indicators.
+```{python}
+PMHSESCOI = pd.read_csv("data/raw-data/PMHSESCOI.csv")
+
+Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+PMHSESCOI["GEOID"] = PMHSESCOI["GEOID"].astype(str)
+
+Crime["Zip Code"] = Crime["Zip Code"].str.strip()
+PMHSESCOI["GEOID"] = PMHSESCOI["GEOID"].str.strip()
+
+PMHSESCOI["GEOID"] = PMHSESCOI["GEOID"].str.replace(r"\.0$", "", regex=True)
+Crime["Zip Code"] = Crime["Zip Code"].str.replace(r"\.0$", "", regex=True)
+
+Crime = Crime.merge(
+    PMHSESCOI[["GEOID","PMH_2023","SES_2023","CHACFZN_2023"]],
+    left_on="Zip Code",
     right_on="GEOID",
     how="left"
 )
 
-Crime2023 = Crime2023.drop(
-    columns=[col for col in Crime2023.columns if "GEOID" in col],
-    errors="ignore"
-)
+Crime = Crime.drop(columns=["GEOID"])
+```
 
-SES2023 = pd.read_csv("/Users/harryfranklin/Downloads/SES2023.csv")
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-SES2023["GEOID"] = SES2023["GEOID"].astype(str)
-Crime2023 = Crime2023.merge(
-    SES2023[["GEOID", "SES_2023"]],
-    left_on="CENSUS_T_1",
+Merge the crime data with the hardship index data.
+```{python}
+HI = pd.read_csv("data/raw-data/HI.csv")
+
+Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+HI["GEOID"] = HI["GEOID"].astype(str)
+
+Crime["Zip Code"] = Crime["Zip Code"].str.strip()
+HI["GEOID"] = HI["GEOID"].str.strip()
+
+HI["GEOID"] = HI["GEOID"].str.replace(r"\.0$", "", regex=True)
+Crime["Zip Code"] = Crime["Zip Code"].str.replace(r"\.0$", "", regex=True)
+
+Crime = Crime.merge(
+    HI[["GEOID", "HDX_2019-2023"]],
+    left_on="Zip Code",
     right_on="GEOID",
     how="left"
 )
 
-Crime2023 = Crime2023.drop(
-    columns=[col for col in Crime2023.columns if "GEOID" in col],
-    errors="ignore"
-)
+Crime = Crime.drop(columns=["GEOID"])
+```
 
-HI2023 = pd.read_csv("/Users/harryfranklin/Downloads/HI2023.csv")
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-HI2023["GEOID"] = HI2023["GEOID"].astype(str)
-Crime2023 = Crime2023.merge(
-    HI2023[["GEOID", "HDX_2019-2023"]],
-    left_on="CENSUS_T_1",
+Merge the crime date with the behavioral-health hospitalization data.
+```{python}
+BHH = pd.read_csv("data/raw-data/BHH.csv")
+
+Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+BHH["GEOID"] = BHH["GEOID"].astype(str)
+
+Crime["Zip Code"] = Crime["Zip Code"].str.strip()
+BHH["GEOID"] = BHH["GEOID"].str.strip()
+
+BHH["GEOID"] = BHH["GEOID"].str.replace(r"\.0$", "", regex=True)
+Crime["Zip Code"] = Crime["Zip Code"].str.replace(r"\.0$", "", regex=True)
+
+Crime = Crime.merge(
+    BHH[["GEOID", "HDBHR_2023"]],
+    left_on="Zip Code",
     right_on="GEOID",
     how="left"
 )
 
-Crime2023 = Crime2023.drop(
-    columns=[col for col in Crime2023.columns if "GEOID" in col],
-    errors="ignore"
-)
+Crime = Crime.drop(columns=["GEOID"])
+```
 
-CHI2023 = pd.read_csv("/Users/harryfranklin/Downloads/CHI2023.csv")
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-CHI2023["GEOID"] = CHI2023["GEOID"].astype(str)
-Crime2023 = Crime2023.merge(
-    CHI2023[["GEOID", "CHACFZN_2023"]],
-    left_on="CENSUS_T_1",
+Merge the crime data with the social vulnerability index data.
+```{python}
+SVI = pd.read_csv("data/raw-data/SVI_2022.csv")
+
+Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+SVI["GEOID"] = SVI["GEOID"].astype(str)
+
+Crime["Zip Code"] = Crime["Zip Code"].str.strip()
+SVI["GEOID"] = SVI["GEOID"].str.strip()
+
+SVI["GEOID"] = SVI["GEOID"].str.replace(r"\.0$", "", regex=True)
+Crime["Zip Code"] = Crime["Zip Code"].str.replace(r"\.0$", "", regex=True)
+
+Crime = Crime.merge(
+    SVI[["GEOID", "SVI_2022"]],
+    left_on="Zip Code",
     right_on="GEOID",
     how="left"
 )
 
-Crime2023 = Crime2023.drop(
-    columns=[col for col in Crime2023.columns if "GEOID" in col],
-    errors="ignore"
+Crime = Crime.drop(columns=["GEOID"])
+```
+
+Adjust column names for new variables.
+```{python}
+Crime = Crime.rename(columns={"PMH_2023": "Poor Mental Health"})
+Crime = Crime.rename(columns={"SES_2023": "Lacking Social/Emotional Support"})
+Crime = Crime.rename(columns={"CHACFZN_2023": "Childhood Opportunity Index"})
+Crime = Crime.rename(columns={"HDX_2019-2023": "Hardship Index"})
+Crime = Crime.rename(columns={"HDBHR_2023": "Behavioral Health-related Hospitalizations"})
+Crime = Crime.rename(columns={"SVI_2022": "Social Vulnerability Index"})
+Crime
+```
+
+Subset the data to 2023 and calculate the crime rate by zip code within that year.
+```{python}
+Crime_2023 = Crime[Crime["Date"].dt.year == 2023].copy()
+
+zip_crime_counts = (
+    Crime_2023.groupby("Zip Code")
+    .size()
+    .reset_index(name="TotalCrimes")
 )
 
-Crime2023 = Crime2023.rename(columns={"HDX_2019-2023": "HDX"})
-Crime2023 = Crime2023.rename(columns={"CHACFZN_2023": "COI"})
-
-Crime2023 = Crime2023.rename(columns={"PMH_2023": "PMH"})
-Crime2023 = Crime2023.rename(columns={"SES_2023": "SES"})
-Crime2023 = Crime2023.dropna(subset=["Population"])
-
-Crime2023["Population"] = (
-    Crime2023["Population"]
-    .astype(str)            # ensure it's a string first
-    .str.replace(",", "", regex=False)
-    .str.strip()
+Crime_2023 = Crime_2023.merge(
+    zip_crime_counts,
+    on="Zip Code",
+    how="left"
 )
-Crime2023["Population"] = pd.to_numeric(Crime2023["Population"], errors="coerce")
 
-tract_vars = (
-    Crime2023.groupby("CENSUS_T_1", as_index=False)
+Crime_2023["CrimeRate"] = Crime_2023["TotalCrimes"] / Crime_2023["Population"] * 1000
+
+Crime_2023 = Crime_2023.drop(columns=["TotalCrimes"])
+```
+
+Save the Crime dataset in derived-data.
+```{python}
+Crime.to_csv(os.path.join("data/", "derived-data/Crime.csv"), index=False)
+```
+
+Aggregate the data and group by zip code. Then calculate Pearson correlation coefficients between the crime rate and the other variables.
+```{python}
+zip_data = (
+    Crime_2023.groupby("Zip Code")
     .agg({
-        "PMH": "first",
-        "SES": "first",
-        "HDX": "first",
-        "COI": "first",
-        "Population": "first"
+        "CrimeRate": "first",
+        "Poor Mental Health": "first",
+        "Lacking Social/Emotional Support": "first",
+        "Childhood Opportunity Index": "first",
+        "Behavioral Health-related Hospitalizations": "first",
+        "Hardship Index": "first",
+        "Social Vulnerability Index": "first"
     })
-)
-
-cols_to_numeric = ["PMH", "SES", "HDX", "COI"]
-for col in cols_to_numeric:
-    Crime2023[col] = pd.to_numeric(Crime2023[col], errors="coerce")
-
-# Clean Population separately
-Crime2023["Population"] = (
-    Crime2023["Population"].astype(str)
-    .str.replace(",", "", regex=False)
-    .str.strip()
-)
-Crime2023["Population"] = pd.to_numeric(Crime2023["Population"], errors="coerce")
-
-Crime2023["Date"] = pd.to_datetime(Crime2023["Date"])
-
-# Count crimes per tract
-tract_crime = (
-    Crime2023
-    .groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="crime_count")
-)
-
-# Aggregate tract-level variables
-tract_vars = (
-    Crime2023.groupby("CENSUS_T_1", as_index=False)
-    .agg({
-        "PMH": "first",
-        "SES": "first",
-        "HDX": "first",
-        "COI": "first",
-        "Population": "first"
-    })
-)
-
-# Merge counts with tract variables
-tract_data = tract_crime.merge(tract_vars, on="CENSUS_T_1", how="left")
-
-# Keep only tracts with positive population
-tract_data = tract_data[tract_data["Population"] > 0]
-
-# Compute crime rate
-tract_data["crime_rate"] = (tract_data["crime_count"] / tract_data["Population"]) * 1000
-
-# Compute correlations
-corr_cols = ["crime_rate", "PMH", "SES", "HDX", "COI"]
-correlations = tract_data[corr_cols].corr(method="pearson")
-print(correlations["crime_rate"].sort_values(ascending=False))
-```
-
-```{python}
-import numpy as np
-from scipy.stats import pearsonr
-
-results = []
-
-health_vars = ["PMH", "SES", "HDX", "COI"]
-
-for var in health_vars:
-    df = tract_data[["crime_rate", var]].dropna()
-    n = len(df)
-    
-    r, p = pearsonr(df["crime_rate"], df[var])
-    
-    # Standard error formula
-    se = np.sqrt((1 - r**2) / (n - 2))
-    
-    results.append({
-        "Variable": var,
-        "Correlation (r)": r,
-        "Std Error": se,
-        "P-value": p,
-        "N": n
-    })
-
-corr_df = pd.DataFrame(results)
-print(corr_df)
-
-Banana = corr_df
-Banana = Banana.reset_index()
-Banana.columns = ["Number", "Health Indicator", "Correlation Coefficient", "Std Error", "P-Value", "N"]
-Banana = Banana[Banana["Health Indicator"] != "crime_rate"]
-Banana["Health Indicator"] = Banana["Health Indicator"].replace({
-    "PMH": "% of adults who reported >13 days of poor mental health in the past month",
-    "SES": "Percent of adults who report rarely or never getting the social and emotional support they need",
-    "HDX": "Hardship Index",
-    "COI": "Childhood Opportunity Index"
-})
-
-Banana
-Banana = Banana.drop(columns=["Number"])
-Banana
-```
-
-```{python}
-import geopandas as gpd
-
-PATH = "data/Census_20Tracts/Census_Tracts.shp"
-gdf = gpd.read_file(PATH)
-gdf = gdf.to_crs(epsg=4326)
-
-import altair as alt
-import pandas as pd
-import json
-
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-gdf["CENSUS_T_1"] = gdf["CENSUS_T_1"].astype(str)
-
-
-tract_crimes = (
-    Crime2023.groupby("CENSUS_T_1")
-    .size()
-    .reset_index(name="total_crimes")
-)
-
-tract_crimes = tract_crimes.merge(
-    Crime2023[["CENSUS_T_1", "Population"]].drop_duplicates(),
-    on="CENSUS_T_1",
-    how="left"
-)
-
-tract_crimes["crime_rate"] = (tract_crimes["total_crimes"] / tract_crimes["Population"]) * 1000
-
-gdf = gdf.drop(columns=[col for col in gdf.columns if "crime_rate" in col], errors="ignore")
-gdf = gdf.merge(
-    tract_crimes[["CENSUS_T_1", "crime_rate"]],
-    on="CENSUS_T_1",
-    how="left"
-)
-
-gdf["crime_rate"] = gdf["crime_rate"].fillna(0)  
-
-gdf_json = json.loads(gdf.to_json())
-
-chart9 = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
-    color=alt.Color(
-        'properties.crime_rate:Q',
-        scale=alt.Scale(scheme='reds'),
-        title='Crime Rate per 1,000 Residents'
-    ),
-    tooltip=[
-        alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
-        alt.Tooltip('properties.crime_rate:Q', title='Crime Rate')
-    ]
-).properties(
-    width=700,
-    height=700,
-    title='Chicago Crime Rate by Census Tract (2023)'
-).project('mercator')  # ← use mercator projection to orient north-up
-
-chart9
-```
-
-```{python}
-Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-gdf["CENSUS_T_1"] = gdf["CENSUS_T_1"].astype(str)
-
-# Compute crime rate per 1,000 residents
-tract_data = (
-    Crime2023.groupby("CENSUS_T_1")
-    .agg(
-        total_crimes=('CENSUS_T_1', 'size'),
-        Population=('Population', 'first'),
-        PMH=('PMH', 'first'),
-        SES=('SES', 'first'),
-        HDX=('HDX', 'first'),
-        COI=('COI', 'first')
-    )
     .reset_index()
 )
 
-tract_data["crime_rate"] = (tract_data["total_crimes"] / tract_data["Population"]) * 1000
+cols = [
+    "CrimeRate",
+    "Poor Mental Health",
+    "Lacking Social/Emotional Support",
+    "Childhood Opportunity Index",
+    "Behavioral Health-related Hospitalizations",
+    "Hardship Index",
+    "Social Vulnerability Index"
+]
 
-gdf = gdf.merge(
-    tract_data[['CENSUS_T_1', 'crime_rate', 'PMH', 'SES', 'HDX', 'COI']],
-    on='CENSUS_T_1',
-    how='left'
-)
+zip_data.to_csv(os.path.join("data/", "derived-data/zip_data.csv"), index=False)
 
-for col in ['PMH','SES','HDX','COI']:
-    gdf[col] = gdf[col].fillna(0)
+zip_data[cols] = zip_data[cols].apply(pd.to_numeric, errors="coerce")
 
-gdf_json = json.loads(gdf.to_json())
+corr = zip_data.corr(numeric_only=True)["CrimeRate"].sort_values(ascending=False)
+print(corr)
 ```
 
+Plot crime rate versus hardship index to identify outliers.
 ```{python}
-def plot_chicago_heatmap(var, title=None, color_scheme='reds'):
-    if title is None:
-        title = f'Chicago {var} by Census Tract (2023)'
+alt.Chart(zip_data).mark_circle(size=80).encode(
+    x="Hardship Index:Q",
+    y=alt.Y("CrimeRate:Q", title="Crime Rate"),
+).properties(
+    title="Crime Rate by Hardship Index for Chicago Zip Codes"
+    )
+```
+
+Remove the three outlier zip codes, and generate new correlation coefficients
+```{python}
+zip_data_clean = zip_data[zip_data["CrimeRate"] <= 150]
+
+corr = zip_data_clean.corr(numeric_only=True)["CrimeRate"].sort_values(ascending=False)
+print(corr)
+
+
+```
+
+View the outlier zip codes to identify their location.
+```{python}
+outliers = zip_data[zip_data["CrimeRate"] > 150]
+outliers
+```
+
+Calculate Spearman coefficients and plot them with the Pearson coefficients.
+```{python}
+Spearman = zip_data_clean.corr(method="spearman", numeric_only=True)["CrimeRate"]
+Spearman
+
+corr = corr.reset_index()
+Spearman = Spearman.reset_index()
+
+corr.columns = ["Indicator", "Pearson"]
+Spearman.columns = ["Indicator", "Spearman"]
+
+corr_clean = corr[corr["Indicator"] != "CrimeRate"]
+spearman_clean = Spearman[Spearman["Indicator"] != "CrimeRate"]
+
+corr_clean["Pearson"] = corr_clean["Pearson"].abs()
+spearman_clean["Spearman"] = spearman_clean["Spearman"].abs()
+
+combined = corr_clean.merge(spearman_clean, on="Indicator")
+
+combined = combined.sort_values("Pearson", ascending=False)
+
+plot_data = combined.melt(
+    id_vars="Indicator",
+    var_name="Correlation Type",
+    value_name="Coefficient"
+)
+
+indicator_order = combined["Indicator"].tolist()
+
+chart = alt.Chart(plot_data).mark_bar().encode(
+    x=alt.X("Indicator:N", sort=indicator_order, title="Health Indicator", axis=alt.Axis(labelAngle=-30)),
+    y=alt.Y("Coefficient:Q", title="Correlation with Crime Rate"),
+    color="Correlation Type:N",
+    xOffset="Correlation Type"
+).properties(
+    title="Pearson vs Spearman Absolute Value Correlation Coefficient with Crime Rate",
+    width=650,
+    height=400
+)
+```
+
+Define function to make heatmap of Chicago for a given variable.
+```{python}
+def chicago_zip_heatmap(var, label):
+    """
+    var: string, column name in zip_data to plot
+    label: string, used for legend and plot title
+    """
+    map_data = gpd.read_file("data/raw-data/ZC/ZC.shp")
+  
+    map_data["zip"] = map_data["zip"].astype(str)
+    zip_data["Zip Code"] = zip_data["Zip Code"].astype(str)
     
-    chart = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
-        color=alt.Color(
-            f'properties.{var}:Q',
-            scale=alt.Scale(scheme=color_scheme),
-            title=var.replace('_',' ')
-        ),
+  
+    map_data["zip"] = map_data["zip"].str.strip()
+    zip_data["Zip Code"] = zip_data["Zip Code"].str.strip()
+    
+  
+    map_data_merged = map_data.merge(
+        zip_data,
+        left_on="zip",
+        right_on="Zip Code",
+        how="left"
+    )
+    
+    
+    map_json = map_data_merged.__geo_interface__
+
+    
+
+    chart = alt.Chart(alt.Data(values=map_json["features"])).mark_geoshape(
+        stroke='black',
+        strokeWidth=1.5
+    ).encode(
+        color = alt.Color(
+    f"properties.{var}:Q",
+    scale=alt.Scale(scheme="blues", type="quantile"),
+    title=label,
+    legend=alt.Legend(
+        format=".1f",             
+        labelExpr="datum.label"   
+    )
+),
         tooltip=[
-            alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
-            alt.Tooltip(f'properties.{var}:Q', title=var.replace('_',' '))
+            alt.Tooltip("properties.zip:N", title="ZIP Code"),
+            alt.Tooltip(f"properties.{var}:Q", title=label)
         ]
     ).properties(
         width=700,
         height=700,
-        title=title
-    ).project('mercator')
+        title=f"{label} across Chicago by Zip Code"
+    ).project("mercator")
     
     return chart
-
-plot_chicago_heatmap('PMH', 'Chicago % Poor Mental Health by Census Tract (2023)', color_scheme='blues')
 ```
 
+Make a heatmap of the crime rate across Chicago.
 ```{python}
-plot_chicago_heatmap('SES', 'Chicago % Lacking Social/Emotional Support by Census Tract (2023)', color_scheme='purples')
+chicago_zip_heatmap("CrimeRate", "Crime Rate")
 ```
-
-```{python}
-plot_chicago_heatmap('PMH', 'Chicago % Child Opportunity Index by Census Tract (2023)', color_scheme='greens')
-```
-
-```{python}
-plot_chicago_heatmap('HDX', 'Chicago % Hardship Index by Census Tract (2023)', color_scheme='oranges')
-```
-
-
 
