@@ -1,0 +1,88 @@
+---
+title: "Sal Preprocessing, SVI + Crime Merge"
+format: pdf
+---
+
+```{python}
+#libraries and plugins
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import altair as alt 
+import os
+import seaborn as sns 
+import geopandas as gpd
+from shapely.geometry import Point
+
+#settings
+pd.set_option('display.max_columns', None)
+```
+
+### Data Loading
+```{python}
+#Crime Data Loading
+base_path = os.path.dirname(os.path.abspath(__file__))
+Crime = pd.read_csv(os.path.join(base_path, "data/raw-data/Crimes_-_2001_to_Present_20260228.csv"))
+
+#Tracts Crossover File Data Loading
+tracts = gpd.read_file(os.path.join(base_path, "data/raw-data/Census_Tracts_20260228/geo_export_89c4b171-2783-4715-9b7d-e49f753f00f0.shp"))
+
+#SVI Data Loading
+svi = pd.read_csv(os.path.join(base_path, "data/raw-data/illinois.csv"))
+```
+
+### Cleaning, Merging and Shaping
+```{python}
+#svi clean
+svi_cook = svi[svi["COUNTY"] == "Cook County"] 
+svi_cook = svi_cook[["LOCATION", "FIPS", "RPL_THEMES", "E_TOTPOP"]] 
+svi_cook = svi_cook.rename(columns = {"RPL_THEMES" : "SVI"}) 
+
+#crime + tracts spatial merge
+geometry = [Point(xy) for xy in zip(Crime["Longitude"], Crime["Latitude"])] 
+crimes_gdf = gpd.GeoDataFrame(Crime, geometry=geometry, crs="EPSG:4326")
+tracts = tracts.to_crs(crimes_gdf.crs)
+crimes_with_tracts = gpd.sjoin(crimes_gdf, tracts, how="left", predicate="within")
+crimes_with_tracts.to_csv(os.path.join(base_path, "data/derived-data/crimes_with_tracts.csv"), index=False)
+
+#convert FIPS to census tract 
+svi_cook["tract_short"] = svi_cook["FIPS"].astype(str).str[5:]
+
+#merging crime and svi data 
+crimes_with_tracts["census_t_1"] = crimes_with_tracts["census_t_1"].astype(str)
+svi_cook["FIPS"] = svi_cook["FIPS"].astype(str)
+crime_merge = crimes_with_tracts.merge(svi_cook, left_on="census_t_1", right_on="FIPS", how = "left")
+crime_merge.to_csv(os.path.join(base_path, "data/derived-data/crime_svi_merge.csv"), index=False)
+
+#file without NAs
+crime_merge_no_na = crime_merge.dropna(subset=["Location", "SVI"])
+crime_merge_no_na.to_csv(os.path.join(base_path, "data/derived-data/crime_svi_merge_no_na.csv"), index=False)
+```
+
+
+```{python}
+#Creating functional complete tract-level dataset revision
+tracts_key = tracts.copy()
+tracts_key["FIPS"] = (tracts_key["census_t_1"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11))
+crime_key = crime_merge_no_na.copy()
+crime_key["FIPS"] = (crime_key["FIPS"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11))
+tract_gb = (
+    crime_key.groupby("FIPS", as_index=False)
+             .agg(pop=("E_TOTPOP", "first"), svi=("SVI", "first")))
+tract_counts = (crime_key.groupby("FIPS", as_index=False)
+    .agg(incidents=("ID", "count")))
+
+#full tract list
+tract_full = (
+    tracts_key[["FIPS", "geometry"]]
+    .merge(tract_gb, on="FIPS", how="left")
+    .merge(tract_counts, on="FIPS", how="left"))
+tract_full["incidents"] = tract_full["incidents"].fillna(0)
+tract_full["pop"] = pd.to_numeric(tract_full["pop"], errors="coerce")
+tract_full["crime_per_1000"] = np.where(
+    (tract_full["pop"].notna()) & (tract_full["pop"] > 0),
+    (tract_full["incidents"] / tract_full["pop"]) * 1000,
+    np.nan)
+tract_full.head()
+tract_full.to_file(os.path.join(base_path, "data/derived-data/tract_full.geojson"), driver="GeoJSON")
+```

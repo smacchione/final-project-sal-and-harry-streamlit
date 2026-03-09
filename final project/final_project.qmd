@@ -1,0 +1,25 @@
+---
+title: "Data Visualization Final Project - Chicago Violence, SVI and Social Metrics"
+author: "Salvatore 'Sal' Macchione and Harry Franklin"
+date: "March 09, 2026"
+format: 
+  pdf:
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+include-before-body:
+  text: |
+    \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+      showspaces = false,
+      showtabs = false,
+      breaksymbolleft={},
+      breaklines
+    }
+output:
+  echo: false
+  eval: false
+---
+# Introduction, Background and Research Question
+
+From the notorious mob violence of the 1920s to the predominantly gang-related crime of today, Chicago has long been grappling with violent crime. Though crime has overall declined over the last several years, the city still makes regional and national headlines — justifiably or not — for its relatively high rates of crime. Though many analyses and dissections of crime in Chicago have been done, there exists a gap in existing data as it pertains to two key questions: 
