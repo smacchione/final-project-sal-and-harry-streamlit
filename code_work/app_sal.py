@@ -10,7 +10,7 @@ st.set_page_config(page_title="Chicago ZIP Crime Dashboard", layout="wide")
 alt.data_transformers.disable_max_rows()
 
 
-BASE_PATH = Path(__file__).resolve().parent
+BASE_PATH = Path(__file__).resolve().parent.parent
 
 DATA_DIR = BASE_PATH / "data"
 RAW_DIR = DATA_DIR / "raw-data"
@@ -111,7 +111,7 @@ def load_zip_geometries(path):
 def metric_definition(metric_name):
     definitions = {
         "incidents": "Raw count of violent-crime incidents in the ZIP code from 2021-2025.",
-        "crime_per_1000": "Violent-crime rate per 1,000 residents in the ZIP code5.",
+        "crime_per_1000": "Violent-crime rate per 1,000 residents in the ZIP code.",
         "arrest_rate": "Percent of incidents in the ZIP code that resulted in an arrest.",
         "domestic_rate": "Percent of incidents in the ZIP code flagged as domestic incidents.",
         "poor_mental_health": "Percent of resident adults aged 18 and older who report 14 or more days during the past 30 days during which their mental health was poor.",
