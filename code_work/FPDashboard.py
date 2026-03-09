@@ -1,273 +1,312 @@
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
 import altair as alt
-import json
 
-alt.data_transformers.disable_max_rows()
+st.set_page_config(
+    page_title="Chicago Crime and Health Dashboard",
+    layout="wide"
+)
 
-# ========================
-# Load Data
-# ========================
-@st.cache_data
-def load_data():
-    # Load raw crime data
-    Crime = pd.read_csv("data/Crimes.csv")
-    Crime["Date"] = pd.to_datetime(Crime["Date"])
+# -------------------------------------------------
+# Sidebar Navigation
+# -------------------------------------------------
 
-    # Convert "SEXUAL ASSAULT" variants
-    Crime["Primary Type"] = Crime["Primary Type"].replace(
-        ["CRIM SEXUAL ASSAULT", "CRIMINAL SEXUAL ASSAULT"],
-        "SEXUAL ASSAULT"
-    )
+page = st.sidebar.radio(
+    "Navigate",
+    ["Crime Trends", "Chicago Indicator Maps"]
+)
 
-    # Create GeoDataFrame for spatial join
-    geometry = [Point(xy) for xy in zip(Crime["Longitude"], Crime["Latitude"])]
-    crimes_gdf = gpd.GeoDataFrame(Crime, geometry=geometry, crs="EPSG:4326")
+# =================================================
+# PAGE 1 — CRIME TRENDS
+# =================================================
 
-    # Load census tracts shapefile
-    tracts = gpd.read_file("data/Census_20Tracts/Census_Tracts.shp").to_crs(crimes_gdf.crs)
-    tracts["CENSUS_T_1"] = tracts["CENSUS_T_1"].astype(str)
+if page == "Crime Trends":
 
-    # Spatial join: assign each crime to a tract
-    crimes_with_tracts = gpd.sjoin(
-        crimes_gdf,
-        tracts[["CENSUS_T_1", "geometry"]],
-        how="left",
-        predicate="within"
-    )
+    st.header("Interactive Crime Trends in Chicago (2021–2025)")
 
-    Crime = pd.DataFrame(crimes_with_tracts)  # convert back to DataFrame
-    Crime["CENSUS_T_1"] = Crime["CENSUS_T_1"].astype(str)
+    @st.cache_data
+    def load_crime_data():
 
-    # Load Population
-    Pop2023 = pd.read_csv("data/Population.csv")
-    Pop2023["GEOID"] = Pop2023["GEOID"].astype(str)
-    Crime = Crime.merge(
-        Pop2023[["GEOID","Population"]],
-        left_on="CENSUS_T_1",
-        right_on="GEOID",
-        how="left"
-    ).drop(columns=[col for col in Crime.columns if "GEOID" in col], errors="ignore")
+        Crime = pd.read_csv("data/raw-data/InitialCrimes.csv")
 
-    Crime["Population"] = pd.to_numeric(Crime["Population"].astype(str).str.replace(",", "").str.strip(), errors="coerce")
+        Crime = Crime.dropna(subset=["Latitude", "Longitude"])
 
-    # Load PMH, SES, HDX, COI
-    PMH2023 = pd.read_csv("data/PMH2023.csv")
-    SES2023 = pd.read_csv("data/SES2023.csv")
-    HI2023  = pd.read_csv("data/HI2023.csv")
-    CHI2023 = pd.read_csv("data/CHI2023.csv")
+        Crime_gdf = gpd.GeoDataFrame(
+            Crime,
+            geometry=gpd.points_from_xy(Crime['Longitude'], Crime['Latitude']),
+            crs="EPSG:4326"
+        )
 
-    for df, new_col in zip([PMH2023, SES2023, HI2023, CHI2023],
-                           ["PMH", "SES", "HDX", "COI"]):
-        df["GEOID"] = df["GEOID"].astype(str)
-        col_name = df.columns[-1]  # last column has the metric
+        zip_codes = gpd.read_file("data/raw-data/ZC/ZC.shp")
+        zip_codes = zip_codes.to_crs(Crime_gdf.crs)
+
+        Crime_with_zip = gpd.sjoin(
+            Crime_gdf,
+            zip_codes,
+            how="left",
+            predicate="within"
+        )
+
+        Crime["Zip Code"] = Crime_with_zip["zip"]
+        Crime = Crime.dropna(subset=["Zip Code"])
+
+        Crime["Date"] = pd.to_datetime(Crime["Date"])
+
+        Population = pd.read_csv("data/raw-data/PopulationZC.csv")
+
+        Crime["Zip Code"] = Crime["Zip Code"].astype(str)
+        Population["GEOID"] = Population["GEOID"].astype(str)
+
         Crime = Crime.merge(
-            df[["GEOID", col_name]].rename(columns={col_name: new_col}),
-            left_on="CENSUS_T_1",
+            Population[["GEOID", "POP_2019-2023"]],
+            left_on="Zip Code",
             right_on="GEOID",
             how="left"
-        ).drop(columns=["GEOID"], errors="ignore")
-        Crime[new_col] = pd.to_numeric(Crime[new_col], errors="coerce").fillna(0)
-
-    # Subsets
-    Battery = Crime[Crime['Primary Type'] == 'BATTERY']
-    Assault = Crime[Crime['Primary Type'] == 'ASSAULT']
-    SA = Crime[Crime['Primary Type'] == 'SEXUAL ASSAULT']
-    Homicide = Crime[Crime['Primary Type'] == 'HOMICIDE']
-
-    return Crime, Battery, Assault, SA, Homicide, tracts
-
-# ========================
-# Helper Functions
-# ========================
-
-def plot_time_series(df, title=None):
-    monthly = df.groupby(pd.Grouper(key="Date", freq="M")).size().reset_index(name="count")
-    chart = (
-        alt.Chart(monthly)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("Date:T", title="Month"),
-            y=alt.Y("count:Q", title="Number of Crimes"),
-            tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("count:Q")]
         )
-        .properties(title=title, width=700, height=400)
-    )
-    return chart
 
-def plot_quintile_crime_rates(df, rate_per=1000, title=None):
-    # Compute tract totals
-    tract_counts = df.groupby("CENSUS_T_1").size().reset_index(name="total_crimes")
-    tract_counts["quintile"] = pd.qcut(tract_counts["total_crimes"], 5,
-                                       labels=["Q1 (Lowest)","Q2","Q3","Q4","Q5 (Highest)"])
-    df = df.merge(tract_counts[["CENSUS_T_1","quintile"]], on="CENSUS_T_1", how="left")
-    df["month"] = df["Date"].dt.to_period("M").dt.to_timestamp()
-    quintile_time = df.groupby(["month","quintile"]).size().reset_index(name="count")
-    chart = (
-        alt.Chart(quintile_time)
-        .mark_line()
-        .encode(
-            x=alt.X("month:T", title="Month"),
-            y=alt.Y("count:Q", title="Number of Crimes"),
-            color=alt.Color("quintile:N", title="Census Tract Quintile")
+        Crime = Crime.drop(columns=["GEOID"])
+        Crime = Crime.rename(columns={"POP_2019-2023": "Population"})
+
+        Crime["Population"] = (
+            Crime["Population"]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .astype(float)
         )
-        .properties(width=700, height=400, title=title)
+
+        Crime["Primary Type"] = Crime["Primary Type"].replace({
+            "CRIM SEXUAL ASSAULT": "CRIMINAL SEXUAL ASSAULT"
+        })
+
+        return Crime
+
+
+    Crime = load_crime_data()
+
+    metric = st.selectbox(
+        "Metric",
+        ["Total Crime", "Crime Rate"]
     )
-    return chart
 
-def plot_chicago_heatmap(gdf, var, color_scheme='reds', title=None):
-    import json
-    gdf_json = json.loads(gdf.to_json())
-    if title is None:
-        title = f'Chicago {var} by Census Tract (2023)'
-    chart = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
-        color=alt.Color(f'properties.{var}:Q', scale=alt.Scale(scheme=color_scheme), title=var.replace("_"," ")),
-        tooltip=[
-            alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
-            alt.Tooltip(f'properties.{var}:Q', title=var.replace("_"," "))
-        ]
-    ).properties(width=700, height=700, title=title).project('mercator')
-    return chart
+    crime_type = st.selectbox(
+        "Crime Type",
+        ["All CRIME", "HOMICIDE", "CRIMINAL SEXUAL ASSAULT", "ASSAULT", "BATTERY"]
+    )
 
-# ========================
-# Streamlit App
-# ========================
+    split_quintiles = st.checkbox("Split Zip Codes into Quintiles")
 
-st.title("Chicago Crime Dashboard (2021–2025)")
-
-Crime, Battery, Assault, SA, Homicide, tracts = load_data()
-
-# --- Section 1: Crime Counts Over Time ---
-st.header("Crime Counts Over Time")
-crime_options = {
-    "All Violent Crimes": Crime,
-    "Battery": Battery,
-    "Assault": Assault,
-    "Sexual Assault": SA,
-    "Homicide": Homicide
-}
-selected_crime = st.selectbox("Select Crime Type", list(crime_options.keys()))
-st.altair_chart(plot_time_series(crime_options[selected_crime], title=f"{selected_crime} Over Time"), use_container_width=True)
-
-# --- Section 2: Quintile Plots ---
-st.header("Census Tract Quintile Trends")
-quintile_options = {
-    "Battery": Battery,
-    "Assault": Assault,
-    "Sexual Assault": SA,
-    "Homicide": Homicide
-}
-selected_quintile = st.selectbox("Select Crime Type for Quintiles", list(quintile_options.keys()))
-st.altair_chart(plot_quintile_crime_rates(quintile_options[selected_quintile],
-                                         title=f"{selected_quintile} Monthly Counts by Quintile"),
-                use_container_width=True)
-
-# --- Section 3: Chicago Heatmaps ---
-st.header("Chicago Census-Tract Heatmaps (2023)")
-
-Crime2023 = Crime[Crime["Date"].dt.year == 2023].copy()
-
-# Load tract-level variables
-PMH2023 = pd.read_csv("data/PMH2023.csv")
-SES2023 = pd.read_csv("data/SES2023.csv")
-HI2023 = pd.read_csv("data/HI2023.csv")
-CHI2023 = pd.read_csv("data/CHI2023.csv")
-
-# Merge all tract variables
-for df, col in zip([PMH2023, SES2023, HI2023, CHI2023], ["PMH", "SES", "HDX", "COI"]):
-    df["GEOID"] = df["GEOID"].astype(str)
-    Crime2023["CENSUS_T_1"] = Crime2023["CENSUS_T_1"].astype(str)
-    if col in ["PMH", "SES"]:
-        Crime2023 = Crime2023.merge(df[["GEOID", f"{col}_2023"]], left_on="CENSUS_T_1", right_on="GEOID", how="left")
-        Crime2023.rename(columns={f"{col}_2023": col}, inplace=True)
+    if crime_type != "All CRIME":
+        subset = Crime[Crime["Primary Type"] == crime_type].copy()
     else:
-        Crime2023 = Crime2023.merge(df[["GEOID", df.columns[1]]], left_on="CENSUS_T_1", right_on="GEOID", how="left")
-        Crime2023.rename(columns={df.columns[1]: col}, inplace=True)
+        subset = Crime.copy()
 
-Crime2023 = Crime2023.drop(columns=[c for c in Crime2023.columns if "GEOID" in c], errors="ignore")
+    if not split_quintiles:
 
-# Clean Population
-Crime2023["Population"] = (
-    Crime2023["Population"].astype(str).str.replace(",", "", regex=False).str.strip()
-)
-Crime2023["Population"] = pd.to_numeric(Crime2023["Population"], errors="coerce")
-Crime2023 = Crime2023.dropna(subset=["Population"])
+        monthly = (
+            subset
+            .set_index("Date")
+            .resample("M")
+            .size()
+            .reset_index(name="CrimeCount")
+        )
 
-# Aggregate tract-level variables
-tract_data = (
-    Crime2023.groupby("CENSUS_T_1")
-    .agg(
-        total_crimes=("CENSUS_T_1", "size"),
-        Population=("Population", "first"),
-        PMH=("PMH", "first"),
-        SES=("SES", "first"),
-        HDX=("HDX", "first"),
-        COI=("COI", "first"),
-    )
-    .reset_index()
-)
+        if metric == "Total Crime":
 
-# Compute crime rate
-tract_data["crime_rate"] = (tract_data["total_crimes"] / tract_data["Population"]) * 1000
+            chart = alt.Chart(monthly).mark_line(color="#08306B").encode(
+                x=alt.X("Date:T", title="Month"),
+                y=alt.Y("CrimeCount:Q", title="Number of Crimes")
+            )
 
-# Load shapefile
-gdf = gpd.read_file("data/Census_20Tracts/Census_Tracts.shp")
-gdf = gdf.to_crs(epsg=4326)
-gdf["CENSUS_T_1"] = gdf["CENSUS_T_1"].astype(str)
+        else:
 
-# Merge shapefile with tract data
-gdf = gdf.merge(tract_data, on="CENSUS_T_1", how="left")
-for col in ['PMH','SES','HDX','COI','crime_rate']:
-    gdf[col] = gdf[col].fillna(0)
+            total_population = (
+                Crime[["Zip Code", "Population"]]
+                .drop_duplicates()["Population"]
+                .sum()
+            )
 
-# Convert to JSON for Altair
-gdf_json = json.loads(gdf.to_json())
+            monthly["CrimeRate"] = monthly["CrimeCount"] / total_population * 1000
 
-# Dropdown mapping
-dropdown_options = {
-    "Self-Reported Poor Mental Health (%)": "PMH",
-    "Self-Reported Lacking Social/Emotional Support": "SES",
-    "Child Opportunity Index": "COI",
-    "Hardship Index": "HDX",
-    "Crime Rate per 1,000 Residents": "crime_rate"
-}
+            chart = alt.Chart(monthly).mark_line(color="#08306B").encode(
+                x=alt.X("Date:T", title="Month"),
+                y=alt.Y("CrimeRate:Q", title="Crime Rate (per 1,000 Residents)")
+            )
 
-selected_var = st.selectbox(
-    "Select variable to plot",
-    options=list(dropdown_options.keys())
-)
+    else:
 
-# Map colors for each variable
-color_schemes = {
-    "PMH": "blues",
-    "SES": "purples",
-    "COI": "greens",
-    "HDX": "oranges",
-    "crime_rate": "reds"
-}
+        zip_counts = (
+            subset.groupby("Zip Code")
+            .size()
+            .reset_index(name="TotalCrimes")
+        )
 
-# Function to plot
-def plot_chicago_heatmap(var, title=None):
-    if title is None:
-        title = f"Chicago {var} by Census Tract (2023)"
-    chart = alt.Chart(alt.Data(values=gdf_json['features'])).mark_geoshape().encode(
+        zip_pop = Crime[["Zip Code", "Population"]].drop_duplicates()
+
+        zip_stats = zip_pop.merge(zip_counts, on="Zip Code", how="left")
+
+        zip_stats["TotalCrimes"] = zip_stats["TotalCrimes"].fillna(0)
+
+        if metric == "Total Crime":
+            zip_stats["Metric"] = zip_stats["TotalCrimes"]
+        else:
+            zip_stats["Metric"] = zip_stats["TotalCrimes"] / zip_stats["Population"] * 1000
+
+        zip_stats["Quintile"] = pd.qcut(
+            zip_stats["Metric"],
+            5,
+            labels=["Q1 Lowest", "Q2", "Q3", "Q4", "Q5 Highest"]
+        )
+
+        subset = subset.merge(
+            zip_stats[["Zip Code", "Quintile"]],
+            on="Zip Code",
+            how="left"
+        )
+
+        monthly = (
+            subset
+            .set_index("Date")
+            .groupby("Quintile")
+            .resample("M")
+            .size()
+            .reset_index(name="CrimeCount")
+        )
+
+        chart = alt.Chart(monthly).mark_line().encode(
+            x=alt.X("Date:T", title="Month"),
+            y=alt.Y("CrimeCount:Q", title="Number of Crimes"),
+            color=alt.Color(
+                "Quintile:N",
+                scale=alt.Scale(range=[
+                    "#08306B",
+                    "#2171B5",
+                    "#6BAED6",
+                    "#BDD7E7",
+                    "#C6DBEF"
+                ]),
+                title="Zip Code Quintile"
+            )
+        )
+
+    st.altair_chart(chart, use_container_width=True)
+
+
+# =================================================
+# PAGE 2 — CHICAGO INDICATOR HEATMAPS
+# =================================================
+
+if page == "Chicago Indicator Maps":
+    import streamlit as st
+    import pandas as pd
+    import geopandas as gpd
+    import altair as alt
+    import os
+
+    st.set_page_config(page_title="Health & Crime Heatmaps", layout="wide")
+    st.header("Chicago Zip Code Heatmaps")
+
+    # -----------------------------
+    # Load derived zip_data
+    # -----------------------------
+    zip_data_path = os.path.join("data", "derived-data", "zip_data.csv")
+    zip_data = pd.read_csv(zip_data_path)
+
+    # -----------------------------
+    # Dropdown for variable selection
+    # -----------------------------
+    variable_map = {
+        "Crime Rate": "CrimeRate",
+        "% Reporting Poor Mental Health": "Poor Mental Health",
+        "% Reporting a Lack of Social/Emotional Support": "Lacking Social/Emotional Support",
+        "Behavioral Health-Related Hospitalizations": "Behavioral Health-related Hospitalizations",
+        "Childhood Opportunity Index": "Childhood Opportunity Index",
+        "Social Vulnerability Index": "Social Vulnerability Index",
+        "Hardship Index": "Hardship Index"
+    }
+
+    selected_label = st.selectbox("Select a variable to plot", list(variable_map.keys()))
+    selected_var = variable_map[selected_label]
+
+    # -----------------------------
+    # Ensure numeric and drop NA
+    # -----------------------------
+    zip_data[selected_var] = pd.to_numeric(zip_data[selected_var], errors="coerce")
+    zip_data = zip_data.dropna(subset=[selected_var])
+
+    # -----------------------------
+    # Load Chicago ZIP shapefile
+    # -----------------------------
+    zip_shapefile_path = os.path.join("data", "raw-data", "ZC", "ZC.shp")
+    zip_shapes = gpd.read_file(zip_shapefile_path)
+    zip_shapes["zip"] = zip_shapes["zip"].astype(str).str.strip()
+    zip_data["Zip Code"] = zip_data["Zip Code"].astype(str).str.strip()
+
+    merged = zip_shapes.merge(zip_data, left_on="zip", right_on="Zip Code", how="left")
+
+    # -----------------------------
+    # Cap outliers for color scale
+    # -----------------------------
+    # Avoid extreme outliers flattening the color gradient
+    max_val = merged[selected_var].quantile(0.95)
+    min_val = merged[selected_var].min()
+
+    # -----------------------------
+    # Flatten column names for Altair
+    # -----------------------------
+    merged_alt = merged.copy()
+    merged_alt.columns = [c.replace(" ", "_") for c in merged_alt.columns]
+    selected_var_alt = selected_var.replace(" ", "_")
+
+    # -----------------------------
+    # Create Altair heatmap
+    # -----------------------------
+    chart = alt.Chart(alt.Data(values=merged_alt.__geo_interface__["features"])).mark_geoshape(
+        stroke='black',
+        strokeWidth=1
+    ).encode(
         color=alt.Color(
-            f'properties.{var}:Q',
-            scale=alt.Scale(scheme=color_schemes.get(var, "reds")),
-            title=var.replace('_',' ')
+            f"properties.{selected_var_alt}:Q",
+            scale=alt.Scale(scheme="blues", domain=[min_val, max_val]),
+            title=selected_label
         ),
         tooltip=[
-            alt.Tooltip('properties.CENSUS_T_1:N', title='Census Tract'),
-            alt.Tooltip(f'properties.{var}:Q', title=var.replace('_',' '))
+            alt.Tooltip("properties.zip:N", title="ZIP Code"),
+            alt.Tooltip(f"properties.{selected_var_alt}:Q", title=selected_label)
         ]
     ).properties(
         width=700,
         height=700,
-        title=title
-    ).project('mercator')
-    return chart
+        title=f"{selected_label} across Chicago by ZIP Code"
+    ).project("mercator")
 
-# Render selected plot
-st.altair_chart(plot_chicago_heatmap(dropdown_options[selected_var], selected_var), use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
+
+    # Clip CrimeRate to avoid outlier blowout
+    if selected_var == "CrimeRate":
+        merged[selected_var] = merged[selected_var].clip(upper=150)  # clip top 3 outliers
+
+    # Convert to GeoJSON-like dictionary for Altair
+    map_json = merged.__geo_interface__
+
+    # Altair geoshape heatmap
+    chart = alt.Chart(alt.Data(values=map_json["features"])).mark_geoshape(
+        stroke='black',
+        strokeWidth=1
+    ).encode(
+        color=alt.Color(
+            f"properties.{selected_var}:Q",
+            scale=alt.Scale(scheme="blues", type="quantile"),
+            title=selected_label
+        ),
+        tooltip=[
+            alt.Tooltip("properties.zip:N", title="ZIP Code"),
+            alt.Tooltip(f"properties.{selected_var}:Q", title=selected_label)
+        ]
+    ).properties(
+        width=700,
+        height=700,
+        title=f"{selected_label} Across Chicago by Zip Code"
+    ).project("mercator")
+
+    st.altair_chart(chart, use_container_width=True)
